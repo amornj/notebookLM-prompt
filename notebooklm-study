@@ -2,5 +2,9 @@
 # notebooklm-study — Generate a study guide from a NotebookLM notebook
 # Usage: notebooklm-study "The Denial of Death"
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Resolve the real directory even when symlinked (e.g. via /usr/local/bin)
+REAL_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$REAL_PATH")" && pwd)"
+
 exec python3 "$SCRIPT_DIR/study.py" "$@"
