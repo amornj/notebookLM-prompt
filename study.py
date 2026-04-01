@@ -5,16 +5,17 @@ notebooklm-study — Generate a full study guide from a NotebookLM notebook.
 Usage:
     notebooklm-study "The Denial of Death"
     notebooklm-study "The Denial of Death" --no-anki
-    notebooklm-study "The Denial of Death" --no-email
+    notebooklm-study "The Denial of Death" --no-email --no-pdf
 
 Steps:
   1. Resolve notebook name → ID
-  2. Run 7 study prompts via `nlm query notebook`
-  3. Create + download flashcards via `nlm flashcards create`
-  4. Build Markdown study guide
-  5. Convert to PDF (via /Users/home/.openclaw/workspace/md_to_pdf.py)
-  6. Email PDF to amornj@library.readwise.io
-  7. Import flashcards to Anki → subdeck Amorn::<NotebookName>
+  2. Run 7 study prompts via `nlm query notebook` (all saved to Obsidian journal)
+  3. Trigger NotebookLM Studio: Audio Overview + Quiz (20 MCQ) + Flashcards
+  4. Poll & download artifacts (audio → Downloads, quiz markdown → Obsidian, flashcards → Anki)
+  5. Build Obsidian Markdown (all 7 prompts + artifact links)
+  6. Build PDF (6 prompts: 1,2,3,5,6,7 — MCQ/flashcards hint only)
+  7. Convert PDF, email to amornj@library.readwise.io
+  8. Import flashcards to Anki → subdeck Amorn::<NotebookName>
 """
 
 from __future__ import annotations
@@ -187,47 +188,80 @@ def run_study_prompts(notebook_id: str) -> list[tuple[str, str]]:
     return results
 
 
-def wait_for_flashcards(notebook_id: str, poll_interval: int = STUDIO_POLL_INTERVAL) -> Optional[str]:
+def trigger_studio_artifacts(notebook_id: str) -> dict[str, Optional[str]]:
     """
-    Create flashcards and poll until complete. Returns the artifact ID, or None.
-    Polls for up to STUDIO_POLL_MAX * poll_interval seconds (≈6 min).
+    Trigger audio overview, quiz (20 MCQ), and flashcard generation in parallel.
+    Returns dict of {audio_id, quiz_id, flashcard_id} or None if trigger fails.
     """
-    print("  Creating flashcards...", end=" ", flush=True)
+    results: dict[str, Optional[str]] = {"audio": None, "quiz": None, "flashcards": None}
+
+    # Audio Overview
     try:
-        run(
-            [NLM, "flashcards", "create", notebook_id, "--confirm"],
-            timeout=120,
-        )
-        print("triggered. Polling for completion", end="... ", flush=True)
+        run([NLM, "audio", "create", notebook_id, "--confirm"], timeout=120)
+        print("  🎧 Audio overview triggered")
     except Exception as e:
-        print(f"trigger failed: {e}")
-        return None
+        print(f"  ⚠ Audio trigger failed: {e}")
+
+    # Quiz (20 MCQ, difficulty 3)
+    try:
+        run([NLM, "quiz", "create", notebook_id, "--count", "20", "--difficulty", "3", "--confirm"], timeout=120)
+        print("  📝 Quiz (20 MCQ) triggered")
+    except Exception as e:
+        print(f"  ⚠ Quiz trigger failed: {e}")
+
+    # Flashcards
+    try:
+        run([NLM, "flashcards", "create", notebook_id, "--confirm"], timeout=120)
+        print("  🃏 Flashcards triggered")
+    except Exception as e:
+        print(f"  ⚠ Flashcards trigger failed: {e}")
+
+    return results
+
+
+def poll_artifacts(notebook_id: str) -> dict[str, Optional[dict]]:
+    """
+    Poll until audio, quiz, and flashcards are all completed (or timed out).
+    Returns dict of {type: {id, status, ...}} for completed/failed ones.
+    """
+    ARTIFACT_TYPES = ["audio_overview", "flashcards", "quiz"]
+    found: dict[str, Optional[dict]] = {"audio_overview": None, "flashcards": None, "quiz": None}
 
     for attempt in range(STUDIO_POLL_MAX):
-        time.sleep(poll_interval)
+        time.sleep(STUDIO_POLL_INTERVAL)
         try:
             result = run([NLM, "list", "artifacts", notebook_id], timeout=30)
             artifacts = json.loads(result.stdout)
-            flashcards = [
-                a for a in artifacts
-                if a.get("type") == "flashcards"
-            ]
-            if flashcards:
-                latest = flashcards[-1]
-                if latest["status"] == "completed":
-                    print(f"done ({latest['id'][:8]}...)")
-                    return latest["id"]
-                elif latest["status"] == "failed":
-                    print("flashcard generation failed")
-                    return None
         except Exception as e:
-            print(f"\n  poll error: {e}, retrying...", end=" ", flush=True)
+            print(f"  poll error: {e}, retrying...")
+            continue
 
+        # Check each type
+        for atype in ARTIFACT_TYPES:
+            if found[atype] is not None:
+                continue  # already found completed
+            matches = [a for a in artifacts if a.get("type") == atype]
+            if not matches:
+                continue
+            latest = matches[-1]
+            if latest["status"] == "completed":
+                found[atype] = latest
+                names = {"audio_overview": "Audio", "flashcards": "Flashcards", "quiz": "Quiz"}
+                print(f"  ✓ {names.get(atype, atype)} ready ({latest['id'][:8]}...)")
+            elif latest["status"] == "failed":
+                found[atype] = {"status": "failed"}
+                names = {"audio_overview": "Audio", "flashcards": "Flashcards", "quiz": "Quiz"}
+                print(f"  ✗ {names.get(atype, atype)} failed")
+
+        # All found or timed out?
+        if all(v is not None for v in found.values()):
+            break
         if (attempt + 1) % 6 == 0:
-            print(f"({(attempt+1)*poll_interval}s elapsed, still polling...)", end=" ")
+            print(f"  ({(attempt+1)*STUDIO_POLL_INTERVAL}s elapsed, still polling...)")
 
-    print("timed out after 6 minutes")
-    return None
+    if not any(v is not None for v in found.values()):
+        print("  ⚠ No studio artifacts completed in time")
+    return found
 
 
 def download_flashcards(
@@ -305,12 +339,16 @@ def parse_markdown_flashcards(md_path: Path) -> list[dict]:
     return cards
 
 
-def build_markdown(
+def build_obsidian_markdown(
     title: str,
     prompt_results: list[tuple[str, str]],
-    cards: list[dict],
+    quiz_downloaded: bool = False,
+    audio_downloaded: bool = False,
 ) -> Path:
-    """Assemble the study guide markdown file and save to temp dir."""
+    """
+    Save FULL study guide (all 7 prompts) to Obsidian journal.
+    Includes MCQ (Prompt 4) and links to quiz/audio/flashcard artifacts.
+    """
     slug = slugify(title)
     date_prefix = datetime.now().strftime("%Y-%m-%d")
     out_path = OBSIDIAN_JOURNAL / f"{date_prefix}-{slug}-study-prompts.md"
@@ -319,15 +357,58 @@ def build_markdown(
     lines = [
         f"# {title} — Study Prompts",
         "",
-        "*Generated by notebooklm-study | MCQ and flashcards available in NotebookLM*",
+        "*Generated by notebooklm-study | Quiz (20 MCQ), Audio Overview & Flashcards available in NotebookLM*",
         "",
     ]
 
-    # Only include prompts 1,2,3,5,6,7 in the PDF (skip exam-style Q4)
-    PDF_PROMPT_INDICES = {1, 2, 3, 5, 6, 7}
+    # All 7 prompts — including MCQ (Prompt 4)
+    for i, (ptitle, response) in enumerate(prompt_results, 1):
+        lines.append(f"## {i}. {ptitle}")
+        lines.append("")
+        lines.append(response.strip())
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    # Studio artifacts section
+    lines.append("## NotebookLM Studio Artifacts")
+    lines.append("")
+    lines.append("| Artifact | Status | Location |")
+    lines.append("|---|---|---|")
+    lines.append(f"| 🎧 Audio Overview | {'✅ Downloaded to Downloads folder' if audio_downloaded else '⏳ Open NotebookLM to listen'} | NotebookLM notebook |")
+    lines.append(f"| 📝 Quiz (20 MCQ) | {'✅ Downloaded to Obsidian journal' if quiz_downloaded else '⏳ Open NotebookLM to access'} | NotebookLM notebook |")
+    lines.append(f"| 🃏 Flashcards | ✅ Imported to Anki | Amorn::{title} deck |")
+    lines.append("")
+    lines.append("*Access these artifacts directly in your NotebookLM notebook: https://notebooklm.google.com*")
+
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"  Obsidian markdown: {out_path}")
+    return out_path
+
+
+def build_pdf_markdown(
+    title: str,
+    prompt_results: list[tuple[str, str]],
+) -> Path:
+    """
+    Build a PDF-optimized markdown with only prompts 1,2,3,5,6,7
+    (skip exam-style MCQ — it's in the Obsidian journal and NotebookLM).
+    """
+    slug = slugify(title)
+    pdf_md_path = STUDY_TEMP_DIR / f"{slug}-pdf.md"
+    pdf_md_path.parent.mkdir(exist_ok=True)
+
+    PDF_INDICES = {1, 2, 3, 5, 6, 7}
+
+    lines = [
+        f"# {title} — Study Prompts",
+        "",
+        "*Generated by notebooklm-study*",
+        "",
+    ]
 
     for i, (ptitle, response) in enumerate(prompt_results, 1):
-        if i in PDF_PROMPT_INDICES:
+        if i in PDF_INDICES:
             lines.append(f"## {i}. {ptitle}")
             lines.append("")
             lines.append(response.strip())
@@ -335,19 +416,23 @@ def build_markdown(
             lines.append("---")
             lines.append("")
 
-    # Hint at end of PDF
+    # Hint at end
     lines.append("---")
     lines.append("")
-    lines.append("*MCQ and flashcards are available in NotebookLM — open your notebook to access them.*")
+    lines.append("## NotebookLM Studio")
+    lines.append("")
+    lines.append("**20 MCQ Quiz, Audio Overview & Flashcards** are available in your NotebookLM notebook.")
+    lines.append("Open: https://notebooklm.google.com")
+    lines.append("")
+    lines.append("*Full study guide with all 7 prompts saved to Obsidian journal.*")
 
-    out_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"  Markdown: {out_path}")
-    return out_path
+    pdf_md_path.write_text("\n".join(lines), encoding="utf-8")
+    return pdf_md_path
 
 
-def convert_to_pdf(md_path: Path, title: str) -> Optional[Path]:
+def convert_to_pdf(md_path: Path) -> Optional[Path]:
     """Convert markdown to PDF using the workspace md_to_pdf.py."""
-    slug = slugify(title)
+    slug = md_path.stem.replace("-pdf", "")
     pdf_path = DOWNLOAD_DIR / f"{slug}-study-prompts.pdf"
     print(f"  Converting to PDF...", end=" ", flush=True)
 
@@ -563,37 +648,69 @@ def main() -> None:
     print(f"\n📝 Running {len(PROMPTS)} study prompts (may take 5-10 min)...")
     prompt_results = run_study_prompts(notebook_id)
 
-    # 3. Flashcards
+    # 3. Trigger NotebookLM Studio artifacts (audio, quiz, flashcards) in parallel
     cards: list[dict] = []
-    artifact_id: Optional[str] = None
+    studio_artifacts: dict[str, Optional[dict]] = {}
+    audio_downloaded = False
+    quiz_downloaded = False
+
     if not args.no_flashcards:
-        print("\n🃏 Generating flashcards via NotebookLM...")
-        artifact_id = wait_for_flashcards(notebook_id)
-        if artifact_id:
-            cards = download_flashcards(notebook_id, artifact_id)
+        print("\n🎧📝🃏 Triggering NotebookLM Studio (audio overview, 20-MCQ quiz, flashcards)...")
+        trigger_studio_artifacts(notebook_id)
+        print("  Polling for completion (this may take 3-5 minutes)...")
+        studio_artifacts = poll_artifacts(notebook_id)
+
+        # Download audio to Downloads folder
+        audio_artifact = studio_artifacts.get("audio_overview")
+        if audio_artifact and audio_artifact.get("status") != "failed":
+            aid = audio_artifact.get("id")
+            audio_out = DOWNLOAD_DIR / f"{slug}-audio.m4a"
+            try:
+                run([NLM, "download", "audio", notebook_id, "--id", aid, "-o", str(audio_out)], timeout=120)
+                audio_downloaded = True
+                print(f"  ✓ Audio saved: {audio_out}")
+            except Exception as e:
+                print(f"  ⚠ Audio download failed: {e}")
+
+        # Download quiz (markdown) to Obsidian journal
+        quiz_artifact = studio_artifacts.get("quiz")
+        if quiz_artifact and quiz_artifact.get("status") != "failed":
+            qid = quiz_artifact.get("id")
+            quiz_out_md = OBSIDIAN_JOURNAL / f"{date_prefix}-{slug}-quiz.md"
+            try:
+                run([NLM, "download", "quiz", notebook_id, "--id", qid, "-f", "markdown", "-o", str(quiz_out_md)], timeout=60)
+                quiz_downloaded = True
+                print(f"  ✓ Quiz (20 MCQ) saved: {quiz_out_md}")
+            except Exception as e:
+                print(f"  ⚠ Quiz download failed: {e}")
+
+        # Download flashcards for Anki import
+        flashcard_artifact = studio_artifacts.get("flashcards")
+        if flashcard_artifact and flashcard_artifact.get("status") != "failed":
+            cards = download_flashcards(notebook_id, flashcard_artifact.get("id"))
         else:
-            # Try downloading existing flashcards anyway
-            cards = download_flashcards(notebook_id)
+            cards = download_flashcards(notebook_id)  # fallback: try without ID
     else:
-        print("\n🃏 Skipping flashcard generation (--no-flashcards)")
+        print("\n🎧📝🃏 Skipping studio artifacts (--no-flashcards)")
 
-    # 4. Build markdown
-    print("\n📄 Building markdown study guide...")
-    md_path = build_markdown(title, prompt_results, cards)
+    # 4. Build Obsidian markdown (ALL 7 prompts + artifact links)
+    print("\n📄 Building Obsidian markdown (all 7 prompts)...")
+    obsidian_md_path = build_obsidian_markdown(title, prompt_results, quiz_downloaded, audio_downloaded)
 
-    # 5. Convert to PDF
+    # 5. Build PDF markdown (6 prompts, no MCQ, no flashcards table)
     pdf_path: Optional[Path] = None
     if not args.no_pdf:
-        print("\n📕 Converting to PDF...")
-        pdf_path = convert_to_pdf(md_path, title)
+        print("\n📕 Building PDF (6 prompts)...")
+        pdf_md_path = build_pdf_markdown(title, prompt_results)
+        pdf_path = convert_to_pdf(pdf_md_path)
         if not pdf_path:
             print("  ⚠ PDF conversion failed — will email markdown instead")
 
-    # 6. Email
+    # 6. Email PDF
     email_ok = False
     if not args.no_email:
-        print("\n📧 Emailing...")
-        attach_path = pdf_path or md_path
+        print("\n📧 Emailing PDF...")
+        attach_path = pdf_path or obsidian_md_path
         email_ok = email_pdf(attach_path, title)
 
     # 7. Anki import
@@ -611,10 +728,13 @@ def main() -> None:
     # ── Summary ──────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print(f"✅ notebooklm-study complete: {title}")
-    print(f"   Markdown : {md_path}")
-    print("           (saved to Obsidian journal: ~/projects/obsidian/journal/)")
+    print(f"   Obsidian : {obsidian_md_path}")
     if pdf_path:
         print(f"   PDF      : {pdf_path}")
+    if audio_downloaded:
+        print(f"   🎧 Audio : {DOWNLOAD_DIR}/{slug}-audio.m4a")
+    if quiz_downloaded:
+        print(f"   📝 Quiz  : {OBSIDIAN_JOURNAL}/{date_prefix}-{slug}-quiz.md")
     if not args.no_email:
         status = "✓ sent" if email_ok else "✗ failed"
         print(f"   Email    : {status} → {READER_EMAIL}")
