@@ -642,6 +642,7 @@ def main() -> None:
     print(f"\n🔍 Resolving notebook: '{args.notebook}'")
     notebook_id, title = resolve_notebook(args.notebook)
     slug = slugify(title)
+    date_prefix = datetime.now().strftime("%Y-%m-%d")
     print(f"   → {title}  [{notebook_id[:8]}...]")
 
     # 2. Run study prompts
