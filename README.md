@@ -1,37 +1,54 @@
 # notebooklm-study
 
-Generate a full study guide (Markdown + PDF) and Anki flashcards from a Google NotebookLM notebook — in one command.
+Generate a full study guide (Markdown + PDF), Audio Overview, 20-MCQ Quiz, and Anki flashcards from a Google NotebookLM notebook — in one command.
 
 ```
 $ notebooklm-study "The Denial of Death"
 ```
 
-**What it does:**
-1. Resolves your notebook name to an ID via `nlm` CLI
-2. Runs 7 study prompts against the notebook (big-picture, chapter breakdown, key terms, exam questions, hard concepts, themes, testable traps)
-3. Creates + downloads flashcards from NotebookLM
-4. Assembles everything into a Markdown study guide
-5. Converts to PDF via `md_to_pdf.py`
-6. Emails the PDF to your Readwise Reader inbox
-7. Imports flashcards into Anki under `Amorn::<NotebookName>`
+---
+
+## What Gets Generated
+
+| Output | Destination | Content |
+|--------|-------------|---------|
+| 📄 Obsidian Markdown | `~/projects/obsidian/journal/` | **All 7 prompts** including MCQ + artifact links |
+| 📕 PDF | `~/Downloads/` | **6 prompts** (no MCQ/flashcard table), hint at end |
+| 🎧 Audio Overview | `~/Downloads/` | Podcast-style summary from NotebookLM |
+| 📝 Quiz (20 MCQ) | `~/projects/obsidian/journal/` | Full quiz as markdown |
+| 🃏 Flashcards | Anki `Amorn::<Notebook>` | All cards imported |
+
+---
+
+## The 7 Study Prompts
+
+| # | Title | Obsidian | PDF |
+|---|-------|----------|-----|
+| 1 | Big Picture First | ✅ | ✅ |
+| 2 | Chapter-by-Chapter Breakdown | ✅ | ✅ |
+| 3 | Key Terms & Definitions | ✅ | ✅ |
+| 4 | Exam-Style Questions (20 MCQ) | ✅ | ❌ *(in NotebookLM)* |
+| 5 | Hard Concepts Simplified | ✅ | ✅ |
+| 6 | Connections & Themes | ✅ | ✅ |
+| 7 | Testable Topics & Common Traps | ✅ | ✅ |
 
 ---
 
 ## Installation
 
 ```bash
-# 1. Install the CLI wrapper
+# 1. Link the CLI wrapper
 chmod +x notebooklm-study
-ln -sf "$(pwd)/notebooklm-study" /usr/local/bin/notebooklm-study
+ln -sf ~/projects/notebookLM-prompt/notebooklm-study /usr/local/bin/
 
 # 2. Install Python dependencies
-pip install -r requirements.txt
+pip install -fpdf2 requests
 
 # 3. Make sure these are on your PATH
-nlm        # NotebookLM CLI  → ~/.local/bin/nlm
-gog        # Gmail CLI       → check 'which gog'
+nlm        # NotebookLM CLI
+gog        # Gmail CLI
 
-# 4. Make sure AnkiConnect is installed and Anki is running
+# 4. AnkiConnect addon installed + Anki running
 ```
 
 ---
@@ -39,71 +56,64 @@ gog        # Gmail CLI       → check 'which gog'
 ## Usage
 
 ```bash
-# Basic — full run (prompts + flashcards + PDF + email + Anki)
+# Full run (audio + quiz + flashcards + PDF + email + Anki)
 notebooklm-study "The Denial of Death"
 
-# Skip Anki (just PDF + email)
+# Skip Anki (faster — still gets audio + quiz + PDF)
 notebooklm-study "Manufacturing Consent" --no-anki
 
-# Skip email (just PDF + Anki)
+# Skip email
 notebooklm-study "Manufacturing Consent" --no-email
 
-# Skip PDF (just markdown + Anki)
-notebooklm-study "Manufacturing Consent" --no-pdf
-
-# Skip flashcard generation (faster — just study prompts)
+# Skip all studio artifacts (audio/quiz/flashcards — just study prompts)
 notebooklm-study "Manufacturing Consent" --no-flashcards
 ```
 
 ---
 
-## The 7 Study Prompts
+## Workflow
 
-| # | Title | What it asks |
-|---|-------|-------------|
-| 1 | Big Picture First | 10 most important concepts for an exam, in simple terms |
-| 2 | Chapter-by-Chapter Breakdown | Key ideas, definitions, 2-3 exam Qs per chapter |
-| 3 | Key Terms & Definitions | Full glossary / study list |
-| 4 | Exam-Style Questions | 20 MCQ + short answer + essay questions |
-| 5 | Hard Concepts Simplified | Most confusing ideas, explained simply |
-| 6 | Connections & Themes | How ideas relate; cause-effect; big themes |
-| 7 | Testable Topics & Common Traps | Most examable content + student pitfalls |
-
----
-
-## Output Files
-
-- **Markdown**: `~/Library/.../Tmp/notebooklm-study/<name>-study-prompts.md`
-- **PDF**: `~/Downloads/<name>-study-prompts.pdf`
-- **Email**: PDF sent to `amornj@library.readwise.io`
-- **Anki**: Flashcards imported to `Amorn::<NotebookName>`
+```
+notebooklm name
+    ├── Resolve → notebook ID
+    ├── 7 Study Prompts (nlm query notebook)
+    │       └── All 7 saved to Obsidian journal
+    │
+    ├── Trigger 3 Studio Artifacts in parallel
+    │       ├── 🎧 Audio Overview
+    │       ├── 📝 Quiz (20 MCQ)
+    │       └── 🃏 Flashcards
+    │
+    ├── Poll & Download
+    │       ├── Audio .m4a → ~/Downloads/
+    │       ├── Quiz markdown → Obsidian journal
+    │       └── Flashcards → Anki (Amorn::NotebookName)
+    │
+    ├── PDF (6 prompts only)
+    │       └── Emailed to amornj@library.readwise.io
+    │
+    └── Summary
+```
 
 ---
 
 ## Requirements
 
 - Python 3.10+
-- `nlm` CLI (`~/.local/bin/nlm`, installed via `pip install notebooklm-mcp-cli`)
+- `nlm` CLI (`pip install notebooklm-mcp-cli`)
 - `gog` CLI (for Gmail)
-- AnkiConnect addon installed in Anki + Anki running
-- `/Users/home/.openclaw/workspace/md_to_pdf.py` (used for PDF generation)
+- AnkiConnect addon + Anki running
+- `/Users/home/.openclaw/workspace/md_to_pdf.py`
 - Python packages: `fpdf2`, `requests`
 
 ---
 
 ## Troubleshooting
 
-**"Notebook not found"**
-→ Check exact notebook name with `nlm notebook list`
+**"Notebook not found"** → Check exact name: `nlm notebook list`
 
-**"nlm: command not found"**
-→ Run `ln -sf ~/.local/bin/nlm /usr/local/bin/nlm`
+**Anki import fails** → Make sure Anki is running with AnkiConnect installed (port 8765)
 
-**Anki import fails**
-→ Make sure Anki is running with AnkiConnect installed (port 8765)
+**NLM queries timeout** → Use `--timeout 180` for slower notebooks
 
-**PDF generation fails**
-→ The script will email the `.md` file instead as a fallback
-
-**NLM queries timeout**
-→ Default timeout is 120s; use `--timeout 180` for slower notebooks
+**Studio artifacts take long** → Polling runs up to 6 minutes; use `--no-flashcards` to skip
