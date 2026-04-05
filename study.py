@@ -10,8 +10,8 @@ Usage:
 Steps:
   1. Resolve notebook name → ID
   2. Run 7 study prompts via `nlm query notebook` (all saved to Obsidian journal)
-  3. Trigger NotebookLM Studio: Audio Overview + Quiz (20 MCQ) + Flashcards
-  4. Poll & download artifacts (audio → Downloads, quiz markdown → Obsidian, flashcards → Anki)
+  3. Trigger NotebookLM Studio: Audio Overview + Slide Deck + Quiz (20 MCQ) + Flashcards
+  4. Poll & download artifacts (audio/slides → Downloads, quiz markdown → Obsidian, flashcards → Anki)
   5. Build Obsidian Markdown (all 7 prompts + artifact links)
   6. Build PDF (6 prompts: 1,2,3,5,6,7 — MCQ/flashcards hint only)
   7. Convert PDF, email to amornj@library.readwise.io
@@ -190,10 +190,15 @@ def run_study_prompts(notebook_id: str) -> list[tuple[str, str]]:
 
 def trigger_studio_artifacts(notebook_id: str) -> dict[str, Optional[str]]:
     """
-    Trigger audio overview, quiz (20 MCQ), and flashcard generation in parallel.
-    Returns dict of {audio_id, quiz_id, flashcard_id} or None if trigger fails.
+    Trigger audio overview, slide deck, quiz, and flashcard generation.
+    Returns placeholder keys for parity with the polled artifact set.
     """
-    results: dict[str, Optional[str]] = {"audio": None, "quiz": None, "flashcards": None}
+    results: dict[str, Optional[str]] = {
+        "audio": None,
+        "slides": None,
+        "quiz": None,
+        "flashcards": None,
+    }
 
     # Audio Overview
     try:
@@ -201,6 +206,13 @@ def trigger_studio_artifacts(notebook_id: str) -> dict[str, Optional[str]]:
         print("  🎧 Audio overview triggered")
     except Exception as e:
         print(f"  ⚠ Audio trigger failed: {e}")
+
+    # Slide Deck
+    try:
+        run([NLM, "slides", "create", notebook_id, "--confirm"], timeout=120)
+        print("  📊 Slide deck triggered")
+    except Exception as e:
+        print(f"  ⚠ Slide deck trigger failed: {e}")
 
     # Quiz (20 MCQ, difficulty 3)
     try:
@@ -221,11 +233,22 @@ def trigger_studio_artifacts(notebook_id: str) -> dict[str, Optional[str]]:
 
 def poll_artifacts(notebook_id: str) -> dict[str, Optional[dict]]:
     """
-    Poll until audio, quiz, and flashcards are all completed (or timed out).
+    Poll until audio, slide deck, quiz, and flashcards are all completed
+    (or timed out).
     Returns dict of {type: {id, status, ...}} for completed/failed ones.
     """
-    ARTIFACT_TYPES = ["audio_overview", "flashcards", "quiz"]
-    found: dict[str, Optional[dict]] = {"audio_overview": None, "flashcards": None, "quiz": None}
+    artifact_aliases = {
+        "audio_overview": ["audio_overview"],
+        "slide_deck": ["slide_deck", "slides", "slide-deck"],
+        "flashcards": ["flashcards"],
+        "quiz": ["quiz"],
+    }
+    found: dict[str, Optional[dict]] = {
+        "audio_overview": None,
+        "slide_deck": None,
+        "flashcards": None,
+        "quiz": None,
+    }
 
     for attempt in range(STUDIO_POLL_MAX):
         time.sleep(STUDIO_POLL_INTERVAL)
@@ -236,22 +259,32 @@ def poll_artifacts(notebook_id: str) -> dict[str, Optional[dict]]:
             print(f"  poll error: {e}, retrying...")
             continue
 
-        # Check each type
-        for atype in ARTIFACT_TYPES:
-            if found[atype] is not None:
+        # Check each artifact family.
+        for artifact_key, aliases in artifact_aliases.items():
+            if found[artifact_key] is not None:
                 continue  # already found completed
-            matches = [a for a in artifacts if a.get("type") == atype]
+            matches = [a for a in artifacts if a.get("type") in aliases]
             if not matches:
                 continue
             latest = matches[-1]
             if latest["status"] == "completed":
-                found[atype] = latest
-                names = {"audio_overview": "Audio", "flashcards": "Flashcards", "quiz": "Quiz"}
-                print(f"  ✓ {names.get(atype, atype)} ready ({latest['id'][:8]}...)")
+                found[artifact_key] = latest
+                names = {
+                    "audio_overview": "Audio",
+                    "slide_deck": "Slide deck",
+                    "flashcards": "Flashcards",
+                    "quiz": "Quiz",
+                }
+                print(f"  ✓ {names.get(artifact_key, artifact_key)} ready ({latest['id'][:8]}...)")
             elif latest["status"] == "failed":
-                found[atype] = {"status": "failed"}
-                names = {"audio_overview": "Audio", "flashcards": "Flashcards", "quiz": "Quiz"}
-                print(f"  ✗ {names.get(atype, atype)} failed")
+                found[artifact_key] = {"status": "failed"}
+                names = {
+                    "audio_overview": "Audio",
+                    "slide_deck": "Slide deck",
+                    "flashcards": "Flashcards",
+                    "quiz": "Quiz",
+                }
+                print(f"  ✗ {names.get(artifact_key, artifact_key)} failed")
 
         # All found or timed out?
         if all(v is not None for v in found.values()):
@@ -344,6 +377,7 @@ def build_obsidian_markdown(
     prompt_results: list[tuple[str, str]],
     quiz_downloaded: bool = False,
     audio_downloaded: bool = False,
+    slides_downloaded: bool = False,
 ) -> Path:
     """
     Save FULL study guide (all 7 prompts) to Obsidian journal.
@@ -357,7 +391,7 @@ def build_obsidian_markdown(
     lines = [
         f"# {title} — Study Prompts",
         "",
-        "*Generated by notebooklm-study | Quiz (20 MCQ), Audio Overview & Flashcards available in NotebookLM*",
+        "*Generated by notebooklm-study | Slide Deck, Quiz (20 MCQ), Audio Overview & Flashcards available in NotebookLM*",
         "",
     ]
 
@@ -376,6 +410,7 @@ def build_obsidian_markdown(
     lines.append("| Artifact | Status | Location |")
     lines.append("|---|---|---|")
     lines.append(f"| 🎧 Audio Overview | {'✅ Downloaded to Downloads folder' if audio_downloaded else '⏳ Open NotebookLM to listen'} | NotebookLM notebook |")
+    lines.append(f"| 📊 Slide Deck | {'✅ Downloaded to Downloads folder' if slides_downloaded else '⏳ Open NotebookLM to access'} | NotebookLM notebook |")
     lines.append(f"| 📝 Quiz (20 MCQ) | {'✅ Downloaded to Obsidian journal' if quiz_downloaded else '⏳ Open NotebookLM to access'} | NotebookLM notebook |")
     lines.append(f"| 🃏 Flashcards | ✅ Imported to Anki | Amorn::{title} deck |")
     lines.append("")
@@ -421,7 +456,7 @@ def build_pdf_markdown(
     lines.append("")
     lines.append("## NotebookLM Studio")
     lines.append("")
-    lines.append("**20 MCQ Quiz, Audio Overview & Flashcards** are available in your NotebookLM notebook.")
+    lines.append("**Slide Deck, 20 MCQ Quiz, Audio Overview & Flashcards** are available in your NotebookLM notebook.")
     lines.append("Open: https://notebooklm.google.com")
     lines.append("")
     lines.append("*Full study guide with all 7 prompts saved to Obsidian journal.*")
@@ -649,14 +684,15 @@ def main() -> None:
     print(f"\n📝 Running {len(PROMPTS)} study prompts (may take 5-10 min)...")
     prompt_results = run_study_prompts(notebook_id)
 
-    # 3. Trigger NotebookLM Studio artifacts (audio, quiz, flashcards) in parallel
+    # 3. Trigger NotebookLM Studio artifacts.
     cards: list[dict] = []
     studio_artifacts: dict[str, Optional[dict]] = {}
     audio_downloaded = False
+    slides_downloaded = False
     quiz_downloaded = False
 
     if not args.no_flashcards:
-        print("\n🎧📝🃏 Triggering NotebookLM Studio (audio overview, 20-MCQ quiz, flashcards)...")
+        print("\n🎧📊📝🃏 Triggering NotebookLM Studio (audio overview, slide deck, 20-MCQ quiz, flashcards)...")
         trigger_studio_artifacts(notebook_id)
         print("  Polling for completion (this may take 3-5 minutes)...")
         studio_artifacts = poll_artifacts(notebook_id)
@@ -672,6 +708,18 @@ def main() -> None:
                 print(f"  ✓ Audio saved: {audio_out}")
             except Exception as e:
                 print(f"  ⚠ Audio download failed: {e}")
+
+        # Download slide deck (PDF) to Downloads folder
+        slide_artifact = studio_artifacts.get("slide_deck")
+        if slide_artifact and slide_artifact.get("status") != "failed":
+            sid = slide_artifact.get("id")
+            slide_out = DOWNLOAD_DIR / f"{slug}-slides.pdf"
+            try:
+                run([NLM, "download", "slide-deck", notebook_id, "--id", sid, "-f", "pdf", "-o", str(slide_out)], timeout=120)
+                slides_downloaded = True
+                print(f"  ✓ Slide deck saved: {slide_out}")
+            except Exception as e:
+                print(f"  ⚠ Slide deck download failed: {e}")
 
         # Download quiz (markdown) to Obsidian journal
         quiz_artifact = studio_artifacts.get("quiz")
@@ -692,11 +740,17 @@ def main() -> None:
         else:
             cards = download_flashcards(notebook_id)  # fallback: try without ID
     else:
-        print("\n🎧📝🃏 Skipping studio artifacts (--no-flashcards)")
+        print("\n🎧📊📝🃏 Skipping studio artifacts (--no-flashcards)")
 
     # 4. Build Obsidian markdown (ALL 7 prompts + artifact links)
     print("\n📄 Building Obsidian markdown (all 7 prompts)...")
-    obsidian_md_path = build_obsidian_markdown(title, prompt_results, quiz_downloaded, audio_downloaded)
+    obsidian_md_path = build_obsidian_markdown(
+        title,
+        prompt_results,
+        quiz_downloaded,
+        audio_downloaded,
+        slides_downloaded,
+    )
 
     # 5. Build PDF markdown (6 prompts, no MCQ, no flashcards table)
     pdf_path: Optional[Path] = None
@@ -734,6 +788,8 @@ def main() -> None:
         print(f"   PDF      : {pdf_path}")
     if audio_downloaded:
         print(f"   🎧 Audio : {DOWNLOAD_DIR}/{slug}-audio.m4a")
+    if slides_downloaded:
+        print(f"   📊 Slides: {DOWNLOAD_DIR}/{slug}-slides.pdf")
     if quiz_downloaded:
         print(f"   📝 Quiz  : {OBSIDIAN_JOURNAL}/{date_prefix}-{slug}-quiz.md")
     if not args.no_email:
