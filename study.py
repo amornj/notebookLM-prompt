@@ -129,7 +129,7 @@ def resolve_notebook(name: str) -> tuple[str, str]:
     Tries exact match first, then substring match.
     Exits with code 1 if not found.
     """
-    result = run([NLM, "notebook", "list"], timeout=30)
+    result = run([NLM, "notebook", "list", "--json"], timeout=30)
     notebooks: list[dict] = json.loads(result.stdout)
 
     # Try exact (case-insensitive) match first
@@ -154,6 +154,60 @@ def resolve_notebook(name: str) -> tuple[str, str]:
     print(f"✗ Notebook not found: '{name}'", file=sys.stderr)
     print(f"  Available notebooks:\n  {titles}", file=sys.stderr)
     sys.exit(1)
+
+
+def create_notebook_from_file(file_path: Path) -> tuple[str, str]:
+    """
+    Create a new NotebookLM notebook named after the file, upload the file
+    as a source, and return (notebook_id, title).
+
+    Exits with code 1 on failure.
+    """
+    title = file_path.stem  # e.g. "Structures" from "Structures.pdf"
+
+    # 1. Create the notebook
+    print(f"  Creating notebook '{title}'...", end=" ", flush=True)
+    try:
+        run([NLM, "notebook", "create", title], timeout=60)
+        print("✓")
+    except subprocess.CalledProcessError as e:
+        print(f"✗\n  Failed to create notebook: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # 2. Resolve the new notebook ID by exact title match from the list
+    try:
+        result = run([NLM, "notebook", "list", "--json"], timeout=30)
+        notebooks: list[dict] = json.loads(result.stdout)
+    except Exception as e:
+        print(f"  Failed to list notebooks after creation: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    title_lower = title.strip().lower()
+    notebook_id: Optional[str] = None
+    matched_title = title
+    for nb in notebooks:
+        if nb["title"].strip().lower() == title_lower:
+            notebook_id = nb["id"]
+            matched_title = nb["title"].strip()
+            break
+
+    if not notebook_id:
+        print(f"  ✗ Could not find newly created notebook '{title}' in list", file=sys.stderr)
+        sys.exit(1)
+
+    # 3. Upload the file as a source (--wait so it's processed before querying)
+    print(f"  Uploading '{file_path.name}' as source (waiting for processing)...", end=" ", flush=True)
+    try:
+        run(
+            [NLM, "source", "add", notebook_id, "--file", str(file_path), "--wait"],
+            timeout=700,  # generous — --wait-timeout default is 600s
+        )
+        print("✓")
+    except subprocess.CalledProcessError as e:
+        print(f"✗\n  Source upload failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    return notebook_id, matched_title
 
 
 def run_study_prompts(notebook_id: str) -> list[tuple[str, str]]:
@@ -651,8 +705,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate study guide + flashcards from a NotebookLM notebook.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  notebooklm-study \"Structures\"          # use existing notebook\n"
+            "  notebooklm-study path/to/Structures.pdf  # create notebook + upload PDF"
+        ),
     )
-    parser.add_argument("notebook", help="Notebook name (fuzzy-matched)")
+    parser.add_argument(
+        "notebook",
+        help="Notebook name (fuzzy-matched) OR path to a PDF/file to create a new notebook from",
+    )
     parser.add_argument(
         "--no-pdf", action="store_true", help="Skip PDF generation"
     )
@@ -673,12 +735,19 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # 1. Resolve notebook
-    print(f"\n🔍 Resolving notebook: '{args.notebook}'")
-    notebook_id, title = resolve_notebook(args.notebook)
+    # 1. Resolve notebook (or create from file)
+    input_path = Path(args.notebook)
+    if input_path.exists() and input_path.is_file():
+        print(f"\n📄 File detected: '{input_path.name}' — creating new notebook...")
+        notebook_id, title = create_notebook_from_file(input_path)
+        print(f"   → {title}  [{notebook_id[:8]}...]")
+    else:
+        print(f"\n🔍 Resolving notebook: '{args.notebook}'")
+        notebook_id, title = resolve_notebook(args.notebook)
+        print(f"   → {title}  [{notebook_id[:8]}...]")
+
     slug = slugify(title)
     date_prefix = datetime.now().strftime("%Y-%m-%d")
-    print(f"   → {title}  [{notebook_id[:8]}...]")
 
     # 2. Run study prompts
     print(f"\n📝 Running {len(PROMPTS)} study prompts (may take 5-10 min)...")
